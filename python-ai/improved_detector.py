@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import os
 
 try:
     import mediapipe as mp
@@ -25,7 +26,8 @@ class ImprovedGestureDetector:
         
         self.last_detection = None
         self.detection_count = 0
-        self.stable_threshold = 3
+        # Frontend sends frames at a low rate by default; allow tuning without changing logic.
+        self.stable_threshold = max(1, int(os.getenv("STABLE_THRESHOLD", "2")))
         
     def detect_hand_landmarks(self, frame):
         if MEDIAPIPE_AVAILABLE and self.hands:
@@ -49,7 +51,7 @@ class ImprovedGestureDetector:
         tip_above_pip = tip_y < pip_y - 0.05
         return tip_above_pip
     
-    def predict_sign(self, features):
+    def _predict_candidate(self, features):
         if features is None or len(features) < 63:
             return None, 0.0
 
@@ -60,6 +62,11 @@ class ImprovedGestureDetector:
 
         def _y(landmark_id: int):
             return features[landmark_id * 3 + 1]
+
+        def _dist(a_id: int, b_id: int):
+            dx = _x(a_id) - _x(b_id)
+            dy = _y(a_id) - _y(b_id)
+            return float((dx * dx + dy * dy) ** 0.5)
         
         wrist_y = _y(0)
         
@@ -75,6 +82,8 @@ class ImprovedGestureDetector:
         middle_pip_y = _y(10)
         middle_mcp_y = _y(9)
         middle_tip_x = _x(12)
+
+        index_mcp_x = _x(5)
         
         ring_tip_y = _y(16)
         ring_pip_y = _y(14)
@@ -83,6 +92,7 @@ class ImprovedGestureDetector:
         pinky_tip_y = _y(20)
         pinky_pip_y = _y(18)
         pinky_mcp_y = _y(17)
+        pinky_tip_x = _x(20)
         
         index_up = self.is_finger_extended(index_tip_y, index_pip_y, index_mcp_y, wrist_y)
         middle_up = self.is_finger_extended(middle_tip_y, middle_pip_y, middle_mcp_y, wrist_y)
@@ -121,6 +131,24 @@ class ImprovedGestureDetector:
         
         detected_sign = None
         confidence = 0.0
+
+        # A few high-signal alphabet gestures that were previously misclassified.
+        # L: index up + thumb out, other fingers closed
+        if index_up and thumb_up and (not middle_up) and (not ring_up) and (not pinky_up) and index_straight:
+            return 'L', 0.90
+
+        # Y: thumb out + pinky up, other fingers closed
+        if pinky_up and thumb_up and (not index_up) and (not middle_up) and (not ring_up):
+            return 'Y', 0.88
+
+        # C / O: use thumb-index distance when hand is generally open.
+        if index_up and middle_up and ring_up and pinky_up:
+            thumb_index = _dist(4, 8)
+            # Typical webcam normalization: distances are in image-normalized coords.
+            if thumb_index < 0.06:
+                return 'O', 0.86
+            if 0.06 <= thumb_index <= 0.14:
+                return 'C', 0.84
         
         if extended_count == 0:
             if thumb_up:
@@ -171,23 +199,46 @@ class ImprovedGestureDetector:
                 detected_sign = '5'
                 confidence = 0.93
             else:
-                detected_sign = '4'
-                confidence = 0.88
+                # Distinguish B vs 4 heuristically:
+                # - B: fingers together and thumb tucked across palm
+                # - 4: fingers typically more spread
+                spread = abs(index_tip_x - pinky_tip_x)
+                thumb_near_palm = abs(thumb_tip_x - index_mcp_x) < 0.08
+                if spread < 0.22 and thumb_near_palm:
+                    detected_sign = 'B'
+                    confidence = 0.86
+                else:
+                    detected_sign = '4'
+                    confidence = 0.88
         
         if detected_sign:
-            if detected_sign == self.last_detection:
-                self.detection_count += 1
-            else:
-                self.detection_count = 1
-                self.last_detection = detected_sign
-            
-            if self.detection_count >= self.stable_threshold:
-                print(f"STABLE: {detected_sign} ({confidence:.0%})")
-                return detected_sign, confidence
-            else:
-                print(f"Stabilizing... ({self.detection_count}/{self.stable_threshold})")
-                return None, 0.0
-        
+            return detected_sign, confidence
+
+        return None, 0.0
+
+    def predict_sign(self, features, require_stable=True):
+        """Predict sign from features. If require_stable=True, applies stability gating."""
+        candidate_sign, candidate_confidence = self._predict_candidate(features)
+        if not require_stable:
+            return candidate_sign, candidate_confidence
+
+        if not candidate_sign:
+            # Reset stability when nothing is confidently detected.
+            self.last_detection = None
+            self.detection_count = 0
+            return None, 0.0
+
+        if candidate_sign == self.last_detection:
+            self.detection_count += 1
+        else:
+            self.detection_count = 1
+            self.last_detection = candidate_sign
+
+        if self.detection_count >= self.stable_threshold:
+            print(f"STABLE: {candidate_sign} ({candidate_confidence:.0%})")
+            return candidate_sign, candidate_confidence
+
+        print(f"Stabilizing... ({self.detection_count}/{self.stable_threshold})")
         return None, 0.0
     
     def release(self):

@@ -46,7 +46,11 @@ def process_video():
             response_data['handDetected'] = True
             hand_landmarks = results.multi_hand_landmarks[0]
             features = detector.extract_features(hand_landmarks)
-            detected_sign, confidence = detector.predict_sign(features)
+            # Stable output for text entry + raw output for UI feedback.
+            detected_sign, confidence = detector.predict_sign(features, require_stable=True)
+            raw_sign, raw_confidence = detector.predict_sign(features, require_stable=False)
+            response_data['rawDetectedSign'] = raw_sign
+            response_data['rawConfidence'] = round(raw_confidence, 2) if raw_sign else 0
             
             if detected_sign:
                 response_data['detectedSign'] = detected_sign

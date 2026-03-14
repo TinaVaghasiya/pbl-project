@@ -6,7 +6,7 @@ Flask-based AI service for hand gesture detection and sign language recognition.
 
 ```bash
 pip install -r requirements.txt
-python app.py
+python app_improved.py
 ```
 
 Service runs on `http://localhost:5001`
